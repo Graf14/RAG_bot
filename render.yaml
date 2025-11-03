@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: rag-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python src/bot.py
+    envVars:
+      TELEGRAM_TOKEN: 
+        generateValue: true
+      OPENROUTER_API_KEY: 
+        generateValue: true
