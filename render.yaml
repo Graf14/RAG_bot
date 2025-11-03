@@ -5,7 +5,7 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python src/bot.py
     envVars:
-      TELEGRAM_TOKEN: 
-        generateValue: true
-      OPENROUTER_API_KEY: 
-        generateValue: true
+      - key: TELEGRAM_BOT_TOKEN
+        value: ${TELEGRAM_BOT_TOKEN}
+      - key: OPENROUTER_API_KEY
+        value: ${OPENROUTER_API_KEY}
