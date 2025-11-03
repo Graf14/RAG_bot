@@ -6,7 +6,13 @@ import json
 import os
 
 # Настройки API
-API_KEY = "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"
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # ← читает .env
+
+API_KEY = os.getenv("OPENROUTER_API_KEY")
 URL = "https://openrouter.ai/api/v1/chat/completions"
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
@@ -17,7 +23,7 @@ HEADERS = {
 MODEL = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 
 # Файлы
-DATA_DIR = "./"
+DATA_DIR = "../data"  # ← на уровень выше, в data/
 CHUNK_FILE = "chunk.json"
 INDEX_FILE = "index.faiss"
 
