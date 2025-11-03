@@ -120,17 +120,25 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 # Webhook endpoint
 @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.process_update(update)
-    return "OK", 200
+    """Получаем обновление от Telegram"""
+    json_data = request.get_data(as_text=True)
+    if not json_data:
+        return "No data", 400
+    try:
+        update = Update.de_json(json.loads(json_data), application.bot)
+        application.process_update(update)
+        return "OK", 200
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        return "Error", 500
 
 @app.route("/")
 def index():
     return "RAG-бот работает! Отправь /start в Telegram."
 
 # === ЗАПУСК ===
+# === ЗАПУСК ===
 if __name__ == "__main__":
-    # Render даёт порт через $PORT
     port = int(os.environ.get("PORT", 5000))
-    print(f"Запуск на порту {port}...")
-    app.run(host="0.0.0.0", port=port)
+    print(f"Запуск Flask на порту {port}...")
+    app.run(host="0.0.0.0", port=port, debug=False)
