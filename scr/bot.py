@@ -22,33 +22,36 @@ if not os.path.exists(CHUNK_PATH) or not os.path.exists(INDEX_PATH):
 
 # === КОНФИГ ===
 load_dotenv()
-
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
-    print("ОШИБКА: нет TELEGRAM_BOT_TOKEN в .env")
+    print("ОШИБКА: нет TELEGRAM_BOT_TOKEN")
     exit(1)
 
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 if not API_KEY:
-    print("ОШИБКА: нет OPENROUTER_API_KEY в .env")
+    print("ОШИБКА: нет OPENROUTER_API_KEY")
     exit(1)
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
 HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
 
-# === ЗАГРУЗКА ===
-print("Загрузка модели...")
-MODEL = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-index = faiss.read_index(INDEX_PATH)
-with open(CHUNK_PATH, "r", encoding="utf-8") as f:
-    chunks = json.load(f)
-print("Готов!")
-
-# === ПАМЯТЬ ===
+# === ГЛОБАЛЬНЫЕ (ленивая загрузка) ===
+MODEL = None
+index = None
+chunks = None
 user_histories = {}
 
 # === ПОИСК ===
 def retrieve_chunks(query, k=3):
+    global MODEL, index, chunks
+    if MODEL is None:
+        print("Загрузка модели (первый запрос)...")
+        MODEL = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+        index = faiss.read_index(INDEX_PATH)
+        with open(CHUNK_PATH, "r", encoding="utf-8") as f:
+            chunks = json.load(f)
+        print("Модель загружена!")
+    
     query_embedding = MODEL.encode([query], convert_to_numpy=True)
     distances, indices = index.search(query_embedding, k)
     return [chunks[i] for i in indices[0] if i < len(chunks)]
@@ -57,14 +60,7 @@ def retrieve_chunks(query, k=3):
 def get_llm_response(query, context_chunks, history):
     context = "\n".join([c["text"] for c in context_chunks]) if context_chunks else "Нет данных"
     messages = [
-        {"role": "system", "content": f"""
-Ты — дружелюбный помощник.
-Говори просто, по-человечески.
-Поддерживай любой диалог.
-Если есть контекст — используй его.
-Контекст:
-{context}
-""".strip()}
+        {"role": "system", "content": f"Ты — дружелюбный помощник. Контекст:\n{context}"}
     ]
     messages.extend(history[-10:])
     messages.append({"role": "user", "content": query})
@@ -84,7 +80,7 @@ def get_llm_response(query, context_chunks, history):
         return answer
     except Exception as e:
         print(f"LLM ошибка: {e}")
-        return "Секунду, что-то с сетью... Напиши ещё раз!"
+        return "Секунду, что-то с сетью..."
 
 # === КОМАНДЫ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -112,15 +108,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-# Добавляем хендлеры
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("clear", clear))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# Webhook endpoint
 @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 def webhook():
-    """Получаем обновление от Telegram"""
     json_data = request.get_data(as_text=True)
     if not json_data:
         return "No data", 400
@@ -137,8 +130,7 @@ def index():
     return "RAG-бот работает! Отправь /start в Telegram."
 
 # === ЗАПУСК ===
-# === ЗАПУСК ===
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"Запуск Flask на порту {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    port = int(os.environ.get("PORT", 10000))
+    print(f"DEBUG: Flask запущен на порту {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
