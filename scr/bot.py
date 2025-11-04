@@ -112,6 +112,8 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("clear", clear))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+import threading
+
 @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 def webhook():
     json_data = request.get_data(as_text=True)
@@ -119,7 +121,8 @@ def webhook():
         return "No data", 400
     try:
         update = Update.de_json(json.loads(json_data), application.bot)
-        application.process_update(update)
+        # Запускаем в отдельном потоке
+        threading.Thread(target=application.process_update, args=(update,)).start()
         return "OK", 200
     except Exception as e:
         print(f"Webhook error: {e}")
