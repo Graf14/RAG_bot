@@ -5,9 +5,21 @@ import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from telegram import Update
-from telegram.ext import Application, ContextTypes, CommandHandler, MessageHandler, filters
-from flask import Flask, request
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from dotenv import load_dotenv
+
+# === ЗАГРУЗКА КЛЮЧЕЙ ===
+load_dotenv()
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
+    print("Ошибка: Проверь .env — TELEGRAM_BOT_TOKEN и OPENROUTER_API_KEY должны быть!")
+    exit(1)
+
+URL = "https://openrouter.ai/api/v1/chat/completions"
+HEADERS = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
 
 # === ПУТИ ===
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -16,51 +28,79 @@ CHUNK_PATH = os.path.join(DATA_DIR, "chunk.json")
 INDEX_PATH = os.path.join(DATA_DIR, "index.faiss")
 
 # Проверка файлов
-if not os.path.exists(CHUNK_PATH) or not os.path.exists(INDEX_PATH):
-    print("ОШИБКА: нет chunk.json или index.faiss")
+if not os.path.exists(CHUNK_PATH):
+    print(f"Ошибка: {CHUNK_PATH} не найден!")
+    exit(1)
+if not os.path.exists(INDEX_PATH):
+    print(f"Ошибка: {INDEX_PATH} не найден!")
     exit(1)
 
-# === КОНФИГ ===
-load_dotenv()
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not TELEGRAM_BOT_TOKEN:
-    print("ОШИБКА: нет TELEGRAM_BOT_TOKEN")
-    exit(1)
+# === ЗАГРУЗКА ===
+print("Загрузка модели и данных...")
+MODEL = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+index = faiss.read_index(INDEX_PATH)
+with open(CHUNK_PATH, "r", encoding="utf-8") as f:
+    chunks = json.load(f)
+print("Готов!")
 
-API_KEY = os.getenv("OPENROUTER_API_KEY")
-if not API_KEY:
-    print("ОШИБКА: нет OPENROUTER_API_KEY")
-    exit(1)
-
-URL = "https://openrouter.ai/api/v1/chat/completions"
-HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-
-# === ГЛОБАЛЬНЫЕ (ленивая загрузка) ===
-MODEL = None
-index = None
-chunks = None
+# === ПАМЯТЬ ===
 user_histories = {}
 
-# === ПОИСК ===
-def retrieve_chunks(query, k=3):
-    global MODEL, index, chunks
-    if MODEL is None:
-        print("Загрузка модели (первый запрос)...")
-        MODEL = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-        index = faiss.read_index(INDEX_PATH)
-        with open(CHUNK_PATH, "r", encoding="utf-8") as f:
-            chunks = json.load(f)
-        print("Модель загружена!")
-    
+# === ПОИСК: ТОП-5 БЕЗ ФИЛЬТРОВ ===
+def retrieve_chunks(query, k=10):
     query_embedding = MODEL.encode([query], convert_to_numpy=True)
     distances, indices = index.search(query_embedding, k)
-    return [chunks[i] for i in indices[0] if i < len(chunks)]
+    
+    relevant = []
+    for dist, idx in zip(distances[0], indices[0]):
+        if idx < len(chunks):
+            relevant.append({
+                "text": chunks[idx]["text"],
+                "doc_id": chunks[idx]["doc_id"],
+                "page_num": chunks[idx]["page_num"],
+                "distance": float(dist)
+            })
+    
+    # Сортируем по релевантности (меньше расстояние = лучше)
+    relevant.sort(key=lambda x: x["distance"])
+    return relevant[:8]  # Топ-5
 
-# === LLM ===
+# === LLM: СВОБОДНЫЙ ДИАЛОГ + КОНТЕКСТ ===
 def get_llm_response(query, context_chunks, history):
-    context = "\n".join([c["text"] for c in context_chunks]) if context_chunks else "Нет данных"
+    # Формируем контекст с источниками
+    if context_chunks:
+        context_parts = []
+        for i, chunk in enumerate(context_chunks, 1):
+            src = f"{chunk['doc_id']}, стр. {chunk['page_num']}"
+            context_parts.append(f"[{i}] {chunk['text']} (из {src})")
+        context = "\n".join(context_parts)
+    else:
+        context = "Нет релевантной информации в базе."
+
     messages = [
-        {"role": "system", "content": f"Ты — дружелюбный помощник. Контекст:\n{context}"}
+ {"role": "system", "content": f"""
+Ты — дружелюбный и умный помощник.
+Говори просто, по-человечески.
+
+ФОРМАТИРОВАНИЕ:
+- Используй абзацы (пустые строки между ними).
+- Делай нумерованные списки: 1. 2. 3.
+- Делай отступы пробелами (4 пробела перед строкой).
+- НЕ используй **, ##, -, *, _, или другие символы Markdown.
+- НЕ выделяй жирным, курсивом, заголовками.
+- Пиши как в обычном сообщении — чистый текст.
+
+ПРАВИЛА:
+1. Отвечай ТОЛЬКО по контексту.
+2. Если пользователь спрашивает про технику — отвечай коротко и по делу.
+3. Если нет — спроси: "Чем помочь?"
+4. Не придумывай.
+5. НЕ говори, что информация "из инструкции", "из базы", "в руководстве", ".Вообще не упонимай что данные берёшь из руководства
+  
+
+Контекст:
+{context}
+""".strip()}
     ]
     messages.extend(history[-10:])
     messages.append({"role": "user", "content": query})
@@ -68,8 +108,8 @@ def get_llm_response(query, context_chunks, history):
     data = {
         "model": "deepseek/deepseek-chat",
         "messages": messages,
-        "max_tokens": 400,
-        "temperature": 0.8
+        "max_tokens": 500,
+        "temperature": 0.7
     }
 
     try:
@@ -78,18 +118,19 @@ def get_llm_response(query, context_chunks, history):
         answer = response.json()["choices"][0]["message"]["content"].strip()
         history.append({"role": "assistant", "content": answer})
         return answer
-    except Exception as e:
-        print(f"LLM ошибка: {e}")
-        return "Секунду, что-то с сетью..."
+    except:
+        return "Секунду, что-то с сетью... Напиши ещё раз!"
 
 # === КОМАНДЫ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_histories.pop(chat_id, None)  # Полная очистка
     await update.message.reply_text("Привет! Чем могу помочь?")
 
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_histories.pop(chat_id, None)
-    await update.message.reply_text("Ок, начинаем заново!")
+    await update.message.reply_text("Память очищена. Начнём заново!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -97,43 +138,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_chat_action("typing")
 
-    relevant_chunks = retrieve_chunks(query, k=3)
+    # Поиск топ-5
+    relevant_chunks = retrieve_chunks(query, k=10)
+    
     history = user_histories.get(chat_id, [])
     answer = get_llm_response(query, relevant_chunks, history)
     user_histories[chat_id] = history
 
     await update.message.reply_text(answer)
 
-# === FLASK + WEBHOOK ===
-app = Flask(__name__)
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("clear", clear))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-import threading
-
-@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-def webhook():
-    json_data = request.get_data(as_text=True)
-    if not json_data:
-        return "No data", 400
-    try:
-        update = Update.de_json(json.loads(json_data), application.bot)
-        # Запускаем в отдельном потоке
-        threading.Thread(target=application.process_update, args=(update,)).start()
-        return "OK", 200
-    except Exception as e:
-        print(f"Webhook error: {e}")
-        return "Error", 500
-
-@app.route("/")
-def index():
-    return "RAG-бот работает! Отправь /start в Telegram."
-
 # === ЗАПУСК ===
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    print(f"DEBUG: Flask запущен на порту {port}")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    print("Бот запущен...")
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.run_polling()
